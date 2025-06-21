@@ -79,22 +79,28 @@ class BaseSlotSettings
      * @param string $errcode The error code
      * @param bool $silent If true, don't output anything, just log
      */
-    public function InternalError($errcode, $silent = false)
-    {
-        $strLog = "\n";
-        $strLog .= ('{"responseEvent":"error","responseType":"' . $errcode . '","serverResponse":"InternalError","request":' . json_encode($_REQUEST) . ',"requestRaw":' . file_get_contents('php://input') . '}');
-        $strLog .= "\n";
-        $strLog .= ' ############################################### ';
-        $strLog .= "\n";
-        
-        $logFile = storage_path('logs/') . $this->slotId . 'Internal.log';
-        $slg = file_exists($logFile) ? file_get_contents($logFile) : '';
-        file_put_contents($logFile, $slg . $strLog);
-        
-        if (!$silent) {
-            exit('');
-        }
+public function InternalError($errcode, $silent = false)
+{
+    $strLog = "\n";
+    $strLog .= date('Y-m-d H:i:s') . ' - ' . $errcode;
+    $strLog .= "\n";
+
+    // Log to a 'logs' directory relative to this Base class.
+    // Ensure the 'logs' directory exists and is writable.
+    $logDir = __DIR__ . '/../logs';
+    if (!is_dir($logDir)) {
+        mkdir($logDir, 0777, true);
     }
+    $logFile = $logDir . '/' . ($this->slotId ?? 'general_errors') . '.log';
+    
+    file_put_contents($logFile, $strLog, FILE_APPEND);
+    
+    if (!$silent) {
+        // In a stateless model, we shouldn't exit. We should let the main handler return an error response.
+        // For now, we'll comment this out to prevent the script from dying.
+        // exit('');
+    }
+}
     
     /**
      * Log a silent internal error (doesn't exit)
@@ -258,15 +264,14 @@ class BaseSlotSettings
 
     // Error handling methods are now defined at the beginning of the class
 
-    public function SetBank($slotState = '', $sum, $slotEvent = '')
-    {
-        // Basic validation, specific game logic might need more
-        if (!is_numeric($sum)) {
-            $this->InternalErrorSilent("SetBank: non-numeric sum provided.");
-            return;
-        }
-        $this->Bank += $sum;
+public function SetBank($sum, $slotState = '', $slotEvent = '')
+{
+    if (!is_numeric($sum)) {
+        $this->InternalErrorSilent("SetBank: non-numeric sum provided.");
+        return;
     }
+    $this->Bank += $sum;
+}
 
     public function SetBalance($sum, $slotEvent = '')
     {
