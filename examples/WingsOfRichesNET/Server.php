@@ -7,11 +7,12 @@ class Server
 {
     private $slotSettings;
 
-    public function handle(array $gameStateData)
+    public function handle(array $topLevelPayload) // Changed parameter name
     {
-        $this->slotSettings = new SlotSettings($gameStateData);
-        $action = $gameStateData['action'] ?? 'init'; // Default to 'init' if no action specified
-        $postData = $gameStateData['postData'] ?? [];
+        // Instantiation as per instruction 1
+        $this->slotSettings = new SlotSettings($topLevelPayload['gameState']);
+        $action = $topLevelPayload['action'] ?? 'init'; // Default to 'init' if no action specified
+        $postData = $topLevelPayload['postData'] ?? [];
 
         // Initialize response structure
         $responseState = [
@@ -122,140 +123,102 @@ class Server
                     break;
 
                 case 'spin':
-                    $lines = 20; // Fixed lines
-                    $betLine = $responseState['betLevel'];
-                    $allBetCoins = $betLine * $lines;
-                    $allBetCurrency = $allBetCoins * $this->slotSettings->CurrentDenom;
-                    $currentMultiplier = 1; // Base multiplier
+                    $lines = $this->slotSettings->gameLine ? count($this->slotSettings->gameLine) : 20;
+                    $betline = $postData['bet_betlevel'] ?? 1;
 
-                    if ($currentSlotEvent != 'freespin') {
-                        $this->slotSettings->SetBalance(-1 * $allBetCoins, $currentSlotEvent);
-                        $bankAmountInCurrency = $allBetCurrency * ($this->slotSettings->GetPercent() / 100);
-                        $this->slotSettings->SetBank($currentSlotEvent, $bankAmountInCurrency, $currentSlotEvent);
-                        // UpdateJackpots is part of BaseSlotSettings, called if enabled
-                        // $this->slotSettings->UpdateJackpots($allBetCurrency);
-
-                        // Reset for normal spin
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'BonusWin', 0);
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'TotalWin', 0);
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeMpl', 1);
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'Bet', $betLine);
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'Denom', $this->slotSettings->CurrentDenom);
-                        $currentMultiplier = 1;
-                    } else { // Freespin
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'CurrentFreeGame', $fsCurrent + 1);
-                        $currentMultiplier = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'FreeMpl') ?? 1;
-                        $betLine = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'Bet') ?? $betLine;
-                        $this->slotSettings->CurrentDenom = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'Denom') ?? $this->slotSettings->CurrentDenom;
-                        $allBetCoins = $betLine * $lines; // Recalculate allBetCoins for FS context
+                    if ($currentSlotEvent !== 'freespin') {
+                        $allbet = $betline * $lines;
+                        if ($this->slotSettings->GetBalance() < $allbet) {
+                            throw new \Exception('Not enough balance for the bet.');
+                        }
+                        $this->slotSettings->SetBalance(-$allbet, 'bet');
+                        $bankAmount = $allbet * ($this->slotSettings->GetPercent() / 100);
+                        $this->slotSettings->SetBank($bankAmount, 'bet'); // Assuming SetBank takes amount in currency and event type
+                    } else {
+                        $betline = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'Bet');
+                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'CurrentFreeGame', $this->slotSettings->GetGameData($this->slotSettings->slotId . 'CurrentFreeGame') + 1);
                     }
+                    // Ensure $topLevelPayload is used here as per instruction 1.e.
+                    $desiredWinType = $topLevelPayload['gameState']['desiredWinType'] ?? 'none';
 
-                    $desiredWinType = $postData['desiredWinType'] ?? 'none'; // 'none', 'win', 'bonus'
-
+                    // Initialize response variables to ensure they always exist
+                    $responseTotalWin = 0;
+                    $responseWinLines = [];
                     $finalReels = [];
-                    $totalWinThisSpin = 0;
-                    $winLinesThisSpin = [];
-                    $scattersCount = 0;
-                    $dandelionLanded = false; // SYM_2 on reel 5
-                    $isSpreadingWildTriggered = false;
-                    $spreadingWildDetails = []; // To store info for response if needed
+                    $scatterCount = 0; // Initialize scatterCount from the chosen spin
 
-                    for ($i = 0; $i <= 500; $i++) { // Spin loop
-                        $totalWinThisSpin = 0;
-                        $winLinesThisLoop = [];
-                        $scattersCount = 0;
-                        $dandelionLanded = false;
-                        $isSpreadingWildTriggered = false;
-                        $spreadingWildDetailsLoop = [];
-
+                    for ($i = 0; $i <= 500; $i++) {
                         $reels = $this->slotSettings->GetReelStrips($desiredWinType, $currentSlotEvent);
-                        $reelsAfterSpread = $this->applySpreadingWilds($reels, $spreadingWildDetailsLoop, $currentSlotEvent);
-                        if(!empty($spreadingWildDetailsLoop)) $isSpreadingWildTriggered = true;
+                        // The WinCalculator needs to be available or its logic incorporated.
+                        // Assuming WinCalculator is in the Base game directory as per typical structure.
+                        $winCalculator = new \app\games\NET\Base\WinCalculator($this->slotSettings);
+                        $winResult = $winCalculator->calculateWins($reels, $betline, $this->slotSettings->Paytable, $this->slotSettings->SymbolGame, $this->linesId, '0', '1');
 
-                        // Check for Dandelion (SYM_2) on reel 5 during Free Spins
-                        if ($currentSlotEvent == 'freespin') {
-                            if ($reelsAfterSpread['reel5'][0] == '2' || $reelsAfterSpread['reel5'][1] == '2' || $reelsAfterSpread['reel5'][2] == '2') {
-                                $dandelionLanded = true;
-                            }
+
+                        $totalWinInLoop = $winResult['totalWin'];
+                        $scatterCountInLoop = $winResult['scatterCount']; // scatterCount from current loop iteration
+
+                        // This is the critical logic that guarantees the outcome
+                        if ($desiredWinType === 'win' && $totalWinInLoop > 0 && $scatterCountInLoop < 3) {
+                            $responseTotalWin = $totalWinInLoop;
+                            $responseWinLines = $winResult['winLines'];
+                            $finalReels = $reels;
+                            $scatterCount = $scatterCountInLoop; // Final scatter count for this spin
+                            break;
+                        } elseif ($desiredWinType === 'bonus' && $scatterCountInLoop >= 3) {
+                            $responseTotalWin = $totalWinInLoop;
+                            $responseWinLines = $winResult['winLines'];
+                            $finalReels = $reels;
+                            $scatterCount = $scatterCountInLoop; // Final scatter count for this spin
+                            break;
+                        } elseif ($desiredWinType === 'none' && $totalWinInLoop == 0 && $scatterCountInLoop < 3) {
+                            $responseTotalWin = 0; // Ensure it's zero for 'none'
+                            $responseWinLines = []; // Ensure empty for 'none'
+                            $finalReels = $reels;
+                            $scatterCount = $scatterCountInLoop; // Final scatter count for this spin
+                            break;
                         }
 
-                        // Calculate line wins
-                        list($totalWinThisSpin, $winLinesThisLoop) = $this->calculateLineWins($reelsAfterSpread, $betLine, $currentMultiplier, $lines);
-
-                        // Count scatters (SYM_0)
-                        for ($r = 1; $r <= 5; $r++) {
-                            for ($p = 0; $p <= 2; $p++) {
-                                if ($reelsAfterSpread['reel' . $r][$p] == '0') {
-                                    $scattersCount++;
-                                }
-                            }
-                        }
-
-                        $bonusTriggeredThisLoop = ($scattersCount >= 3);
-                        $maxWinCheck = $this->slotSettings->MaxWin > 0 && ($totalWinThisSpin * $this->slotSettings->CurrentDenom) > $this->slotSettings->MaxWin;
-
-                        if ($maxWinCheck) continue;
-
-                        if ($desiredWinType == 'bonus') {
-                            if ($bonusTriggeredThisLoop) { $finalReels = $reelsAfterSpread; $winLinesThisSpin = $winLinesThisLoop; $spreadingWildDetails = $spreadingWildDetailsLoop; break; }
-                        } elseif ($desiredWinType == 'win') {
-                            if ($totalWinThisSpin > 0 && !$bonusTriggeredThisLoop) { $finalReels = $reelsAfterSpread; $winLinesThisSpin = $winLinesThisLoop; $spreadingWildDetails = $spreadingWildDetailsLoop; break; }
-                        } else { // 'none'
-                            if ($totalWinThisSpin == 0 && !$bonusTriggeredThisLoop) { $finalReels = $reelsAfterSpread; $winLinesThisSpin = $winLinesThisLoop; $spreadingWildDetails = $spreadingWildDetailsLoop; break; }
-                        }
-                        if ($i == 500) { // Fallback if no desired outcome met
-                            $finalReels = $reelsAfterSpread; $winLinesThisSpin = $winLinesThisLoop; $spreadingWildDetails = $spreadingWildDetailsLoop; break;
+                        // If the loop is about to end, take the last result
+                        if ($i == 500) {
+                            $responseTotalWin = $totalWinInLoop;
+                            $responseWinLines = $winResult['winLines'];
+                            $finalReels = $reels;
+                            $scatterCount = $scatterCountInLoop; // Final scatter count for this spin
                         }
                     }
-                    if(empty($finalReels)) $finalReels = $reelsAfterSpread; // Ensure finalReels is set
 
+                    $totalFreeGames = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'FreeGames') ?? 0;
+                    // Scatter check for triggering free spins should only apply if it's NOT already a free spin event
+                    if ($scatterCount >= 3 && $currentSlotEvent !== 'freespin') {
+                        // scatterCount here is the final one from the chosen spin result
+                        $totalFreeGames = $this->slotSettings->slotFreeCount[$scatterCount] ?? 10;
+                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeGames', $totalFreeGames);
+                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'CurrentFreeGame', 0);
+                        // Also reset BonusWin when new FS are triggered
+                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'BonusWin', 0);
+                         $responseState['totalFreeGames'] = (int)$totalFreeGames; // Add to response if triggered now
+                    }
+
+                    if ($responseTotalWin > 0) {
+                        // Balance update only for main game wins or if FS wins should also update main balance directly
+                        // The provided logic implies direct balance update.
+                        $this->slotSettings->SetBalance($responseTotalWin);
+                        // Bank update for wins (deduct from bank)
+                        // $this->slotSettings->SetBank(-$responseTotalWin * $this->slotSettings->CurrentDenom, $currentSlotEvent);
+                    }
+
+                    // Accumulate wins during free spins into BonusWin
+                    if ($currentSlotEvent === 'freespin' && $responseTotalWin > 0) {
+                        $currentBonusWin = $this->slotSettings->GetGameData($this->slotSettings->slotId . 'BonusWin') ?? 0;
+                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'BonusWin', $currentBonusWin + $responseTotalWin);
+                    }
+
+                    // Update the main $responseState array members
+                    $responseState['totalWin'] = $responseTotalWin;
                     $responseState['reels'] = $finalReels;
-                    $responseState['totalWin'] = $totalWinThisSpin;
-                    $responseState['totalWinCents'] = round($totalWinThisSpin * $this->slotSettings->CurrentDenom * 100);
-                    $responseState['winLines'] = $winLinesThisSpin;
-                    if($isSpreadingWildTriggered) $responseState['spreadingWilds'] = $spreadingWildDetails;
-
-
-                    if ($totalWinThisSpin > 0) {
-                        // For normal spins, SetBalance is called. For FS, it's accumulated to FS total.
-                        if ($currentSlotEvent != 'freespin') {
-                            $this->slotSettings->SetBalance($totalWinThisSpin);
-                            $this->slotSettings->SetBank($currentSlotEvent, -1 * ($totalWinThisSpin * $this->slotSettings->CurrentDenom));
-                        }
-                    }
-
-                    // Handle Free Spin state updates
-                    if ($currentSlotEvent == 'freespin') {
-                        $currentFsBonusWin = ($this->slotSettings->GetGameData($this->slotSettings->slotId . 'BonusWin') ?? 0) + $totalWinThisSpin;
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'BonusWin', $currentFsBonusWin);
-                        if ($dandelionLanded) {
-                            $newMultiplier = ($this->slotSettings->GetGameData($this->slotSettings->slotId . 'FreeMpl') ?? 1) + 1;
-                            // Max multiplier from original logic seems to be x5
-                            $newMultiplier = min($newMultiplier, 5);
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeMpl', $newMultiplier);
-                        }
-                         // If free spins retrigger with scatters during FS (original game awards +10 spins)
-                        if ($scattersCount >=3) {
-                            $fsTotal = ($this->slotSettings->GetGameData($this->slotSettings->slotId . 'FreeGames') ?? 0) + 10; // Add 10 more spins
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeGames', $fsTotal);
-                            $responseState['freeSpinsRetriggered'] = 10;
-                        }
-
-                    } else { // Normal spin
-                        $this->slotSettings->SetGameData($this->slotSettings->slotId . 'TotalWin', $totalWinThisSpin);
-                        if ($scattersCount >= 3) {
-                            $initialFreeSpins = $this->slotSettings->slotFreeCount[$scattersCount] ?? 10;
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeGames', $initialFreeSpins);
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'CurrentFreeGame', 0);
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeMpl', 1); // Reset multiplier for new FS session
-                            $this->slotSettings->SetGameData($this->slotSettings->slotId . 'BonusWin', 0); // Reset bonus win for new FS
-                            // $this->slotSettings->SetGameData($this->slotSettings->slotId . 'FreeBalance', $this->slotSettings->GetBalance());
-                        }
-                    }
-                    $this->updateFreeSpinState($responseState);
-                    // Log after all updates
-                    // $logBet = ($currentSlotEvent == 'freespin') ? 0 : $allBetCurrency;
-                    // $this->slotSettings->SaveLogReport(json_encode($responseState), $logBet, $lines, $totalWinThisSpin * $this->slotSettings->CurrentDenom, $currentSlotEvent);
+                    $responseState['winLines'] = $responseWinLines;
+                    // Other elements like freeSpinState, newBalance will be set/updated later by common code
                     break;
                 default:
                     throw new \Exception("Invalid action: " . $action);
